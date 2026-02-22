@@ -54,7 +54,7 @@ On reboot, the script detects it is running from a snapshot path and ensures the
 Over time, your EFI partition may fill up with pooled kernels. Run the following to clean up entries for snapshots that no longer exist:
 
 ```bash
-sudo snapper-boot-sync manual
+sudo snapper-boot-sync all
 ```
 
 To prune old `@_backup` subvolumes created during rollbacks:
