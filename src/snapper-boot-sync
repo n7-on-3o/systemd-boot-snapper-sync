@@ -1,0 +1,81 @@
+#!/bin/bash
+# systemd-boot-snapper-tools: snapper-boot-sync
+
+# Snapper positional arguments
+EVENT="$1"
+
+# Configuration
+ESP_MOUNT="/boot"
+SNAP_PATH="/.snapshots"
+EFI_LINUX="$ESP_MOUNT/EFI/Linux"
+POOL_DIR="$EFI_LINUX/pool"
+ENTRIES_PATH="$ESP_MOUNT/loader/entries"
+
+mkdir -p "$POOL_DIR"
+
+# Identify the "Master" UKI (the one your system normally boots)
+MASTER_UKI_FULL=$(ls -t "$EFI_LINUX"/*.efi 2>/dev/null | head -n1)
+[[ -z "$MASTER_UKI_FULL" ]] && exit 0
+
+do_create() {
+    # 1. Ensure the current Master UKI is in the pool
+    MASTER_HASH=$(sha256sum "$MASTER_UKI_FULL" | cut -c1-16)
+    MASTER_POOL_PATH="/EFI/Linux/pool/${MASTER_HASH}.efi"
+    [[ -f "${ESP_MOUNT}${MASTER_POOL_PATH}" ]] || cp "$MASTER_UKI_FULL" "${ESP_MOUNT}${MASTER_POOL_PATH}"
+
+    # 2. Iterate through snapshots and create entries
+    for dir in "$SNAP_PATH"/*/snapshot; do
+        [[ -d "$dir" ]] || continue
+        ID=$(basename "$(dirname "$dir")")
+        CONF_FILE="$ENTRIES_PATH/@snapshot-${ID}.conf"
+        
+        # Skip if entry already exists
+        [[ -f "$CONF_FILE" ]] && continue
+
+        # Get snapshot description from XML
+        INFO_FILE="$SNAP_PATH/${ID}/info.xml"
+        DESC=$(grep -oP '(?<=<description>).*?(?=</description>)' "$INFO_FILE" | xargs 2>/dev/null)
+        
+        # Extract cmdline from UKI and update the subvol path
+        RAW_OPTIONS=$(objcopy --dump-section .cmdline=/dev/stdout "$MASTER_UKI_FULL" 2>/dev/null | tr -d '\0' | xargs)
+        [[ -z "$RAW_OPTIONS" ]] && RAW_OPTIONS=$(cat /proc/cmdline | xargs)
+        SNAP_OPTIONS=$(echo "$RAW_OPTIONS" | sed "s|subvol=[^, ]*|subvol=/@snapshots/${ID}/snapshot|g")
+
+        # Write the loader entry
+        echo -e "title   Arch Snap [${ID}] (${DESC:-No Desc})\nlinux   ${MASTER_POOL_PATH}\noptions ${SNAP_OPTIONS}" > "$CONF_FILE"
+    done
+}
+
+do_cleanup() {
+    # 1. Remove entries for snapshots that no longer exist
+    for conf in "$ENTRIES_PATH"/@snapshot-*.conf; do
+        [[ -e "$conf" ]] || continue
+        ID=$(echo "$conf" | grep -oP '@snapshot-\K[0-9]+')
+        [[ ! -d "$SNAP_PATH/$ID" ]] && rm "$conf"
+    done
+
+    # 2. Garbage collect the pool (remove kernels not referenced by any config)
+    USED_KERNELS=$(grep -h "^linux" "$ENTRIES_PATH"/*.conf 2>/dev/null | awk '{print $2}' | sort -u)
+    CURRENT_MASTER_HASH=$(sha256sum "$MASTER_UKI_FULL" | cut -c1-16)
+    
+    for pooled_file in "$POOL_DIR"/*.efi; do
+        REL_PATH="/EFI/Linux/pool/$(basename "$pooled_file")"
+        if ! echo "$USED_KERNELS" | grep -q "$REL_PATH"; then
+             # Never delete the kernel currently matching the Master UKI
+             [[ "$REL_PATH" != "/EFI/Linux/pool/${CURRENT_MASTER_HASH}.efi" ]] && rm "$pooled_file"
+        fi
+    done
+}
+
+case "$EVENT" in
+    "create-snapshot-post")
+        do_create
+        ;;
+    "delete-snapshot-post")
+        do_cleanup
+        ;;
+    "all"|"")
+        do_create
+        do_cleanup
+        ;;
+esac

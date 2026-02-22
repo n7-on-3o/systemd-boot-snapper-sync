@@ -1,0 +1,59 @@
+#!/bin/bash
+# systemd-boot-snapper-tools: snapper-rollback
+
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root"
+   exit 1
+fi
+
+SNAP_ID=$1
+BACKUP_NAME="@_backup_$(date +%Y%m%d_%H%M%S)"
+ESP_MOUNT="/boot"
+
+if [[ -z "$SNAP_ID" ]]; then
+    echo "Usage: snapper-rollback <snapshot-id>"
+    exit 1
+fi
+
+# 1. Verification
+SNAP_PATH="/.snapshots/${SNAP_ID}/snapshot"
+if [[ ! -d "$SNAP_PATH" ]]; then
+    echo "Error: Snapshot ${SNAP_ID} does not exist."
+    exit 1
+fi
+
+echo "--- Starting Rollback to Snapshot ${SNAP_ID} ---"
+
+# 2. Mount Btrfs Root (ID 5)
+mkdir -p /tmp/btrfs_root
+mount $(findmnt -no SOURCE /) -o subvolid=5 /tmp/btrfs_root
+
+# 3. Swap Subvolumes
+echo "Archiving current @ to ${BACKUP_NAME}..."
+mv /tmp/btrfs_root/@ "/tmp/btrfs_root/${BACKUP_NAME}"
+
+echo "Creating writable clone of snapshot ${SNAP_ID} as @..."
+btrfs subvolume snapshot "/tmp/btrfs_root/@snapshots/${SNAP_ID}/snapshot" /tmp/btrfs_root/@
+
+# 4. Kernel Synchronization
+# Ensures the main 'arch-linux.efi' matches the snapshot we just restored
+echo "Synchronizing Master UKI with snapshot kernel..."
+MASTER_UKI=$(ls "$ESP_MOUNT"/EFI/Linux/*.efi 2>/dev/null | head -n1)
+CONF_FILE="$ESP_MOUNT/loader/entries/@snapshot-${SNAP_ID}.conf"
+
+if [[ -f "$CONF_FILE" && -n "$MASTER_UKI" ]]; then
+    POOL_REL_PATH=$(grep "^linux" "$CONF_FILE" | awk '{print $2}')
+    POOL_FULL_PATH="${ESP_MOUNT}${POOL_REL_PATH}"
+
+    if [[ -f "$POOL_FULL_PATH" ]]; then
+        cp -f "$POOL_FULL_PATH" "$MASTER_UKI"
+        echo "Master UKI updated: $(basename "$MASTER_UKI") now matches Snapshot ${SNAP_ID}."
+    fi
+fi
+
+# 5. Cleanup
+umount /tmp/btrfs_root
+rmdir /tmp/btrfs_root
+
+echo "--- Rollback Complete ---"
+echo "Reboot now to enter your restored system."
