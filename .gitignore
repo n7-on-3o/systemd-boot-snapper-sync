@@ -1,0 +1,16 @@
+# Makepkg build directories
+pkg/
+src/
+
+# Package files
+*.pkg.tar.zst
+*.pkg.tar.xz
+
+# Log files
+*.log
+/tmp/snapper-debug.log
+
+# Temporary or backup files
+*.old
+*~
+.DS_Store
